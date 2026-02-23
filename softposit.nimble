@@ -2,7 +2,7 @@
 
 version       = "0.1.0"
 author        = "Garrett Kinman"
-description   = "A new awesome nimble package"
+description   = "Software implementation of 4-bit posits with 0, 1, or 2 exponent bits."
 license       = "MIT"
 srcDir        = "src"
 

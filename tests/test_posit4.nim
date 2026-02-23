@@ -7,171 +7,173 @@
 
 import unittest
 import softposit
-import math
 
-suite "Basic Values Tests":
-    test "Posit4[0] special values":
-        check positZero[0]().toFloat == 0.0
-        check positInf[0]().toFloat == Inf
-        check posit4[0](1.0).toFloat == 1.0
-        check posit4[0](0.5).toFloat == 0.5
-        check posit4[0](2.0).toFloat == 2.0
-    
-    test "Posit4[1] special values":
-        check positZero[1]().toFloat == 0.0
-        check positInf[1]().toFloat == Inf
-        check posit4[1](1.0).toFloat == 1.0
-        check posit4[1](4.0).toFloat == 4.0
-    
-    test "Posit4[2] special values":
-        check positZero[2]().toFloat == 0.0
-        check positInf[2]().toFloat == Inf
-        check posit4[2](1.0).toFloat == 1.0
-        check posit4[2](16.0).toFloat == 16.0
+const refTables: array[3, array[16, float64]] = [
+    [0.0, 0.25, 0.5, 0.75, 1.0, 1.5, 2.0, 4.0,
+        0.0, -4.0, -2.0, -1.5, -1.0, -0.75, -0.5, -0.25],
+    [0.0, 1.0/16, 0.25, 0.5, 1.0, 2.0, 4.0, 16.0,
+        0.0, -16.0, -4.0, -2.0, -1.0, -0.5, -0.25, -1.0/16],
+    [0.0, 1.0/256, 1.0/16, 1.0/8, 1.0, 2.0, 16.0, 256.0,
+        0.0, -256.0, -16.0, -2.0, -1.0, -0.125, -1.0/16, -1.0/256],
+]
 
-suite "Arithmetic Operations":
-    test "Addition":
-        let a = posit4[1](1.5)
-        let b = posit4[1](0.5)
-        check (a + b).toFloat == 2.0
-        
-    test "Subtraction":
-        let a = posit4[1](1.5)
-        let b = posit4[1](0.5)
-        check (a - b).toFloat == 1.0
-        
-    test "Multiplication":
-        let a = posit4[1](1.5)
-        let b = posit4[1](0.5)
-        check (a * b).toFloat == 0.75
-        
-    test "Division":
-        let a = posit4[1](1.5)
-        let b = posit4[1](0.5)
-        # Note: Result might not be exact due to rounding
-        check abs((a / b).toFloat - 3.0) < 0.5
-        
-    test "Negation":
-        let a = posit4[1](1.5)
-        check (-a).toFloat == -1.5
-        
-    test "Zero negation":
-        let zero = positZero[1]()
-        check (-zero).toFloat == 0.0
+# ─────────────────────────────────────────────────────────────────────────────
 
-suite "Comparison Operations":
-    test "Equality":
-        let p1 = posit4[0](1.0)
-        let p2 = posit4[0](1.0)
-        let p3 = posit4[0](0.5)
-        
-        check p1 == p2
-        check not (p1 == p3)
-        
-    test "Less than":
-        let p1 = posit4[0](0.5)
-        let p2 = posit4[0](1.0)
-        
-        check p1 < p2
-        check not (p2 < p1)
-        check not (p1 < p1)
-        
-    test "Less than or equal":
-        let p1 = posit4[0](0.5)
-        let p2 = posit4[0](1.0)
-        
-        check p1 <= p2
-        check p1 <= p1
-        check not (p2 <= p1)
+suite "decode (toFloat)":
 
-suite "Packing Operations":
-    test "Pack and unpack":
-        let high = posit4[1](2.0)
-        let low = posit4[1](0.5)
-        
-        let packed = pack(high, low)
-        let unpackedLow = unpackLow[Posit4[1]](packed)
-        let unpackedHigh = unpackHigh[Posit4[1]](packed)
-        
-        check unpackedLow == low
-        check unpackedHigh == high
-        
-    test "Pack preserves bits":
-        let high = posit4[1](7'u8)  # Direct bit pattern
-        let low = posit4[1](3'u8)   # Direct bit pattern
-        
-        let packed = pack(high, low)
-        check uint8(packed) == 0x73  # 0111_0011
+    test "Posit<4,0> matches spec table":
+        for i in 0..15:
+            let p = Posit4[0](uint8(i))
+            if i == 8:
+                check p.isNaR
+            else:
+                check abs(p.toFloat - refTables[0][i]) < 1e-12
 
-suite "Special Cases":
-    test "Infinity arithmetic":
-        let inf = positInf[1]()
-        let one = posit4[1](1.0)
-        
-        check (inf + one).toFloat == Inf
-        check (inf * one).toFloat == Inf
-        check (one / positZero[1]()).toFloat == Inf
-        
-    test "Zero arithmetic":
-        let zero = positZero[1]()
-        let one = posit4[1](1.0)
-        
-        check (zero + one).toFloat == 1.0
-        check (zero * one).toFloat == 0.0
-        check (zero - zero).toFloat == 0.0
+    test "Posit<4,1> matches spec table":
+        for i in 0..15:
+            let p = Posit4[1](uint8(i))
+            if i == 8:
+                check p.isNaR
+            else:
+                check abs(p.toFloat - refTables[1][i]) < 1e-12
 
-suite "Min/Max Values":
-    test "Posit4[0] extremes":
-        check minPos[0]().toFloat == 0.25
-        check maxPos[0]().toFloat == 2.0
-        check negMinPos[0]().toFloat == -0.25
-        check negMaxPos[0]().toFloat == -2.0
-        
-    test "Posit4[1] extremes":
-        check minPos[1]().toFloat == 0.0625
-        check maxPos[1]().toFloat == 16.0
-        check negMinPos[1]().toFloat == -0.0625
-        check negMaxPos[1]().toFloat == -16.0
+    test "Posit<4,2> matches spec table":
+        for i in 0..15:
+            let p = Posit4[2](uint8(i))
+            if i == 8:
+                check p.isNaR
+            else:
+                check abs(p.toFloat - refTables[2][i]) < 1e-12
 
-suite "Bit Pattern Tests":
-    test "Known bit patterns for Posit4[0]":
-        # Test specific bit patterns and their values
-        check posit4[0](0b0000'u8).toFloat == 0.0     # Zero
-        check posit4[0](0b0001'u8).toFloat == 0.25    # MinPos
-        check posit4[0](0b0010'u8).toFloat == 0.5
-        check posit4[0](0b0100'u8).toFloat == 1.0
-        check posit4[0](0b0110'u8).toFloat == 1.5
-        check posit4[0](0b0111'u8).toFloat == 2.0     # MaxPos
-        check posit4[0](0b1000'u8).toFloat == Inf     # Infinity
-        
-    test "Known bit patterns for Posit4[1]":
-        check posit4[1](0b0000'u8).toFloat == 0.0     # Zero
-        check posit4[1](0b0001'u8).toFloat == 0.0625  # MinPos
-        check posit4[1](0b0100'u8).toFloat == 0.5
-        check posit4[1](0b0110'u8).toFloat == 1.0
-        check posit4[1](0b0111'u8).toFloat == 2.0
-        check posit4[1](0b1000'u8).toFloat == Inf     # Infinity
+# ─────────────────────────────────────────────────────────────────────────────
 
-suite "Round Trip Conversions":
-    test "Float to posit to float preserves representable values":
-        # Test values that should be exactly representable
-        let testValues = [0.0, 0.5, 1.0, 1.5, 2.0, -0.5, -1.0, -1.5, -2.0]
-        
-        for val in testValues:
-            let p = posit4[0](val)
-            let roundTrip = p.toFloat
-            # Check if the value is preserved (within posit precision)
-            if val == 0.0:
-                check roundTrip == 0.0
-            elif abs(val) <= 2.0:  # Within Posit4[0] range
-                check abs(roundTrip - val) < 0.3  # Coarse check due to 4-bit precision
-            
-    test "Bit pattern round trip":
-        # Every valid 4-bit pattern should round trip through conversions
-        for i in 0'u8..15'u8:
-            let p1 = posit4[1](i)
-            let f = p1.toFloat
-            if f != Inf and f == f:  # Not infinity or NaN
-                let p2 = posit4[1](f)
-                # Due to rounding, we check if we get the same or adjacent value
-                check abs(int(uint8(p2)) - int(i)) <= 1
+suite "negation":
+
+    test "2's-complement bit patterns":
+        for i in 1..15:
+            if i == 8: continue
+            let p        = Posit4[1](uint8(i))
+            let expected = uint8(((not uint8(i)) + 1) and 0xF)
+            check uint8(-p) == expected
+
+    test "zero and NaR are fixed points":
+        check uint8(-Posit4[1](0'u8)) == 0
+        check uint8(-Posit4[1](8'u8)) == 8
+
+    test "double negation identity":
+        for i in 0..15:
+            let p = Posit4[0](uint8(i))
+            check uint8(-(-p)) == uint8(p)
+
+# ─────────────────────────────────────────────────────────────────────────────
+
+suite "reciprocal":
+
+    test "recip(1) == 1":
+        check recip(Posit4[1].fromFloat(1.0)).toFloat == 1.0
+
+    test "recip(NaR) == NaR":
+        check recip(Posit4[1](8'u8)).isNaR
+
+    test "recip(0) == NaR":
+        check recip(Posit4[1](0'u8)).isNaR
+
+    test "recip(recip(x)) == x for all non-special values":
+        for i in 1..15:
+            if i == 8: continue
+            let p = Posit4[1](uint8(i))
+            check uint8(recip(recip(p))) == uint8(p)
+
+# ─────────────────────────────────────────────────────────────────────────────
+
+suite "multiplication":
+
+    test "exact products (powers of 2)":
+        let cases = [(2.0, 2.0, 4.0), (4.0, 4.0, 16.0), (0.25, 4.0, 1.0),
+                    (-2.0, 2.0, -4.0), (-1.0/16, 16.0, -1.0), (0.5, 0.5, 0.25)]
+        for (a, b, want) in cases:
+            check abs((Posit4[1].fromFloat(a) * Posit4[1].fromFloat(b)).toFloat - want) < 1e-12
+
+    test "x * 0 == 0 for all non-NaR":
+        for i in 0..15:
+            let p = Posit4[1](uint8(i))
+            if not p.isNaR:
+                check (p * Posit4[1](0'u8)).isZero
+
+    test "x * NaR == NaR for all x":
+        for i in 0..15:
+            check (Posit4[1](uint8(i)) * Posit4[1](8'u8)).isNaR
+
+# ─────────────────────────────────────────────────────────────────────────────
+
+suite "addition":
+
+    test "exact sums":
+        let cases = [(1.0, 1.0, 2.0), (2.0, 2.0, 4.0), (0.5, 0.5, 1.0),
+                    (-1.0, 1.0, 0.0), (-2.0, -2.0, -4.0), (0.25, 0.25, 0.5)]
+        for (a, b, want) in cases:
+            check abs((Posit4[0].fromFloat(a) + Posit4[0].fromFloat(b)).toFloat - want) < 1e-12
+
+    test "x + (-x) == 0 for all non-NaR":
+        for i in 0..15:
+            let p = Posit4[1](uint8(i))
+            if not p.isNaR:
+                check (p + (-p)).isZero
+
+# ─────────────────────────────────────────────────────────────────────────────
+
+suite "division":
+
+    test "exact quotients":
+        let cases = [(4.0, 2.0, 2.0), (1.0, 4.0, 0.25),
+                    (16.0, 4.0, 4.0), (-2.0, 2.0, -1.0)]
+        for (a, b, want) in cases:
+            check abs((Posit4[1].fromFloat(a) / Posit4[1].fromFloat(b)).toFloat - want) < 1e-12
+
+    test "x / 0 == NaR for all x":
+        for i in 0..15:
+            check (Posit4[1](uint8(i)) / Posit4[1](0'u8)).isNaR
+
+# ─────────────────────────────────────────────────────────────────────────────
+
+suite "cross-es conversion":
+
+    test "Posit4[1] → Posit4[2] preserves representable values":
+        check Posit4[1].fromFloat(2.0).to(Posit4[2]).toFloat == 2.0
+        check Posit4[1].fromFloat(16.0).to(Posit4[2]).toFloat == 16.0
+
+    test "Posit4[1] → Posit4[0] preserves representable values":
+        check Posit4[1].fromFloat(2.0).to(Posit4[0]).toFloat == 2.0
+        check Posit4[1].fromFloat(1.0).to(Posit4[0]).toFloat == 1.0
+
+# ─────────────────────────────────────────────────────────────────────────────
+
+suite "quire / MAC":
+
+    test "exact accumulation before rounding":
+        # dot([2, 4, 0.5], [2, 0.5, 2]) = 4 + 2 + 1 = 7
+        var q: Quire4[1]
+        for (a, b) in [(2.0, 2.0), (4.0, 0.5), (0.5, 2.0)]:
+            q += (Posit4[1].fromFloat(a), Posit4[1].fromFloat(b))
+        check abs(q.val - 7.0) < 1e-12
+
+    test "toPosit result is not NaR":
+        var q: Quire4[1]
+        q += (Posit4[1].fromFloat(2.0), Posit4[1].fromFloat(2.0))
+        check not q.toPosit.isNaR
+
+    test "clear resets accumulator":
+        var q: Quire4[1]
+        q += (Posit4[1].fromFloat(4.0), Posit4[1].fromFloat(4.0))
+        q.clear()
+        check q.val == 0.0
+
+# ─────────────────────────────────────────────────────────────────────────────
+
+suite "fromFloat round-trips":
+
+    test "every Posit<4,2> value survives toFloat → fromFloat":
+        for i in 0..15:
+            if i == 8: continue
+            let p = Posit4[2](uint8(i))
+            check uint8(Posit4[2].fromFloat(p.toFloat)) == uint8(p)

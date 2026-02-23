@@ -3,263 +3,248 @@
 # This software is released under the MIT License.
 # https://opensource.org/licenses/MIT
 
-# import softposit / [arithmetics, comparisons, constants, conversions, print, types]
-# export arithmetics, comparisons, constants, conversions, print, types
+import std/math
 
-## softposit.nim - A 4-bit posit implementation for Nim
-## Supports posit<4,0>, posit<4,1>, and posit<4,2>
-
-import math
+# ─────────────────────────────────────────────────────────────────────────────
+# Base types
+# ─────────────────────────────────────────────────────────────────────────────
 
 type
-    Posit4*[es: static[int]] = distinct uint8
-    PackedPosit4*[T] = distinct uint8
+    Posit4*[es: static int] = distinct uint8
+        ## A 4-bit posit with `es` exponent bits (es ∈ {0, 1, 2}).
+        ## bits == 0 → zero; bits == 8 → NaR (projective infinity).
+
+    FloatLUT  = array[16, float64]
+    UnaryLUT  = array[16, uint8]
+    BinaryLUT = array[256, uint8]
+
+# ─────────────────────────────────────────────────────────────────────────────
+# Float tables — copied verbatim from the spec
+# ─────────────────────────────────────────────────────────────────────────────
+# Index 8 is NaR; stored as 0.0 sentinel, handled via isNaR checks.
 
 const
-    # TODO: are these needed?
-    nbits = 4
-    npat = 16  # 2^4
+    kNaR = 8'u8
 
-# Useed values for different es
-template useed(es: static[int]): untyped =
-    when es == 0: 2
-    elif es == 1: 4
-    elif es == 2: 16
-    elif es == 3: 64
-    elif es == 4: 256
-    else: {.error: "Unsupported es value".}
+    kFloatTables: array[3, FloatLUT] = [
+        # Posit<4,0>  useed=2   minpos=1/4   maxpos=4
+        [0.0,   1.0/4,   1.0/2,   3.0/4,
+        1.0,   3.0/2,   2.0,     4.0,
+        0.0,                          # index 8 = NaR sentinel
+        -4.0,  -2.0,    -3.0/2,  -1.0,
+        -3.0/4, -1.0/2,  -1.0/4],
 
-# Special values
-template positZero*[es: static[int]](): Posit4[es] = Posit4[es](0)
-template positInf*[es: static[int]](): Posit4[es] = Posit4[es](8)  # 1000 in binary
+        # Posit<4,1>  useed=4   minpos=1/16  maxpos=16
+        [0.0,    1.0/16,  1.0/4,   1.0/2,
+        1.0,    2.0,     4.0,     16.0,
+        0.0,                           # index 8 = NaR sentinel
+        -16.0,  -4.0,    -2.0,    -1.0,
+        -1.0/2,  -1.0/4,  -1.0/16],
 
-func isZero*[es: static[int]](p: Posit4[es]): bool =
-    uint8(p) == 0  # 0000 in binary
+        # Posit<4,2>  useed=16  minpos=1/256 maxpos=256
+        [0.0,    1.0/256, 1.0/16,  1.0/8,
+        1.0,    2.0,     16.0,    256.0,
+        0.0,                           # index 8 = NaR sentinel
+        -256.0, -16.0,   -2.0,    -1.0,
+        -1.0/8,  -1.0/16, -1.0/256],
+    ]
 
-func isInf*[es: static[int]](p: Posit4[es]): bool =
-    uint8(p) == 8  # 1000 in binary
+# ─────────────────────────────────────────────────────────────────────────────
+# Compile-time helper — nearest representable value search
+# ─────────────────────────────────────────────────────────────────────────────
 
-# Conversion from posit to float
-func toFloat*[es: static[int]](p: Posit4[es]): float =
-    let bits = uint8(p)
-    
-    # Special cases
-    if bits == 0:
-        return 0.0
-    if bits == 8:  # 1000 in binary = ±∞
-        return Inf
-        
-    # Extract sign and convert to 2's complement if negative
-    let sign = (bits shr 3) and 1
-    var pbits = if sign == 1: uint8(16 - bits) else: bits
-    
-    # Find regime bits by counting identical bits after sign
-    var regime = 0
-    let bit2 = (pbits shr 2) and 1
-    if bit2 == 1:
-        # Count 1s
-        var mask = 0b0100'u8
-        var shift = 2
-        while shift > 0 and ((pbits and mask) != 0):
-            regime += 1
-            mask = mask shr 1
-            shift -= 1
-    else:
-        # Count 0s  
-        var mask = 0b0100'u8
-        var shift = 2
-        while shift > 0 and ((pbits and mask) == 0):
-            regime -= 1
-            mask = mask shr 1
-            shift -= 1
-        regime -= 1  # Adjust for negative regime
-    
-    # Calculate how many bits are left for exponent and fraction
-    let regimeBits = abs(regime) + 1
-    let bitsLeft = 3 - regimeBits  # 3 bits after sign bit
-    
-    # Extract exponent bits
-    var exponent = 0
-    var expBits = min(es, bitsLeft)
-    if expBits > 0:
-        let startBit = 3 - regimeBits - 1
-        var expMask = 0'u8
-        for i in 0..<expBits:
-            expMask = expMask or (1'u8 shl (startBit - i))
-        exponent = int((pbits and expMask) shr (startBit - expBits + 1))
-    
-    # Extract fraction bits
-    var fraction = 1.0  # Hidden bit
-    let fracBits = max(0, bitsLeft - es)
-    if fracBits > 0:
-        let fracStart = 3 - regimeBits - es - 1
-        var fracValue = 0'u8
-        for i in 0..<fracBits:
-            if fracStart - i >= 0:
-                fracValue = (fracValue shl 1) or ((pbits shr (fracStart - i)) and 1)
-        fraction += float(fracValue) / float(1 shl fracBits)
-    
-    # Calculate final value
-    let useedVal = useed(es)
-    var value = fraction * pow(float(useedVal), float(regime)) * pow(2.0, float(exponent))
-    
-    if sign == 1:
-        value = -value
-        
-    return value
+func nearest(v: float64; es: int): uint8 {.compileTime.} =
+    if v == 0.0 or v == -0.0: return 0'u8
+    var best = 0'u8
+    var bestDist = 1e300
+    for i in 0'u8 ..< 16'u8:
+        if i == kNaR: continue
+        let d = abs(kFloatTables[es][i] - v)
+        if d < bestDist:
+            bestDist = d
+            best = i
+    best
 
-# Conversion from float to posit
-func fromFloat*[es: static[int]](x: float): Posit4[es] =
-    # Special cases
-    if x == 0.0:
-        return positZero[es]()
-    if x.classify == fcInf or x.classify == fcNegInf or x.isNaN:
-        return positInf[es]()
-        
-    var value = abs(x)
-    let sign = if x < 0: 1 else: 0
-    
-    # Scale by powers of useed
-    var regime = 0
-    let useedVal = float(useed(es))
-    
-    if value >= 1.0:
-        while value >= useedVal:
-            value /= useedVal
-            regime += 1
-    else:
-        while value < 1.0:
-            value *= useedVal
-            regime -= 1
-        
-    # Scale by powers of 2 for exponent
-    var exponent = 0
-    let maxExp = (1 shl es) - 1
-    
-    while exponent < maxExp and value >= 2.0:
-        value /= 2.0
-        exponent += 1
-        
-    # Extract fraction (value is now in [1, 2))
-    let fraction = value - 1.0
-    
-    # Build posit bit pattern
-    var pbits = 0'u8
-    var bitPos = 2  # Start after sign bit
-    
-    # Encode regime
-    if regime >= 0:
-        # Positive regime: string of 1s followed by 0
-        for i in 0..min(regime, 2):
-            if bitPos >= 0:
-                pbits = pbits or (1'u8 shl bitPos)
-                bitPos -= 1
-        if bitPos >= 0 and regime < 3:
-            bitPos -= 1  # Terminating 0
-    else:
-        # Negative regime: string of 0s followed by 1
-        for i in 0..<min(-regime, 3):
-            if bitPos >= 0:
-                bitPos -= 1  # 0 bit
-        if bitPos >= 0:
-            pbits = pbits or (1'u8 shl bitPos)
-            bitPos -= 1
-        
-    # Encode exponent
-    var expBits = min(es, bitPos + 1)
-    if expBits > 0:
-        for i in 0..<expBits:
-            if bitPos >= 0:
-                if (exponent and (1 shl (expBits - 1 - i))) != 0:
-                    pbits = pbits or (1'u8 shl bitPos)
-                bitPos -= 1
-            
-    # Encode fraction
-    var fracBits = bitPos + 1
-    if fracBits > 0:
-        let fracInt = int(fraction * float(1 shl fracBits) + 0.5)  # Round to nearest
-        for i in 0..<fracBits:
-            if bitPos >= 0:
-                if (fracInt and (1 shl (fracBits - 1 - i))) != 0:
-                    pbits = pbits or (1'u8 shl bitPos)
-                bitPos -= 1
-            
-    # Apply sign
-    if sign == 1:
-        pbits = uint8(16 - pbits)  # 2's complement negation
-        
-    return Posit4[es](pbits and 0x0F)  # Mask to 4 bits
+# ─────────────────────────────────────────────────────────────────────────────
+# LUT builders
+# ─────────────────────────────────────────────────────────────────────────────
 
-# Arithmetic operations
-func `+`*[es: static[int]](a, b: Posit4[es]): Posit4[es] =
-    # TODO: do actual posit addition
-    # For now, we just convert to float and back
-    fromFloat[es](a.toFloat + b.toFloat)
+func makeNegLUT(es: int): UnaryLUT {.compileTime.} =
+    ## Exact 2's-complement negation; NaR and 0 are fixed points.
+    for i in 0..15:
+        result[i] =
+            if i == 0 or i == 8: uint8(i)
+            else: ((not uint8(i)) + 1'u8) and 0xF'u8
 
-func `-`*[es: static[int]](a, b: Posit4[es]): Posit4[es] =
-    # TODO: do actual posit subtraction
-    # For now, we just convert to float and back
-    fromFloat[es](a.toFloat - b.toFloat)
+func makeAbsLUT(es: int): UnaryLUT {.compileTime.} =
+    let neg = makeNegLUT(es)
+    for i in 0..15:
+        result[i] = if i > 8: neg[i] else: uint8(i)
 
-func `*`*[es: static[int]](a, b: Posit4[es]): Posit4[es] =
-    # TODO: do actual posit multiplication
-    # For now, we just convert to float and back
-    fromFloat[es](a.toFloat * b.toFloat)
+func makeRecipLUT(es: int): UnaryLUT {.compileTime.} =
+    for i in 0..15:
+        result[i] =
+            if i == 0 or i == 8: kNaR
+            else: nearest(1.0 / kFloatTables[es][i], es)
 
-func `/`*[es: static[int]](a, b: Posit4[es]): Posit4[es] =
-    # TODO: do actual posit division
-    # For now, we just convert to float and back
-    fromFloat[es](a.toFloat / b.toFloat)
+func makeSqrtLUT(es: int): UnaryLUT {.compileTime.} =
+    for i in 0..15:
+        result[i] =
+            if i == 8 or i > 8: kNaR       # NaR or negative → NaR
+            elif i == 0: 0'u8
+            else: nearest(sqrt(kFloatTables[es][i]), es)
 
-func `-`*[es: static[int]](a: Posit4[es]): Posit4[es] =
-    # Unary negation using 2's complement
-    let bits = uint8(a)
-    if bits == 0:
-        return Posit4[es](0)
-    else:
-        return Posit4[es](16 - bits)
+func makeAddLUT(es: int): BinaryLUT {.compileTime.} =
+    for a in 0..15:
+        for b in 0..15:
+            result[a * 16 + b] =
+                if a == 8 or b == 8: kNaR
+                else: nearest(kFloatTables[es][a] + kFloatTables[es][b], es)
 
-# Comparison operations
-func `==`*[es: static[int]](a, b: Posit4[es]): bool =
-    uint8(a) == uint8(b)
+func makeSubLUT(es: int): BinaryLUT {.compileTime.} =
+    let neg = makeNegLUT(es)
+    let add = makeAddLUT(es)
+    for a in 0..15:
+        for b in 0..15:
+            result[a * 16 + b] = add[a * 16 + int(neg[b])]
 
-func `<`*[es: static[int]](a, b: Posit4[es]): bool =
-    # Posits can be compared as signed integers
-    let aBits = int8(if uint8(a) >= 8: int(uint8(a)) - 16 else: int(uint8(a)))
-    let bBits = int8(if uint8(b) >= 8: int(uint8(b)) - 16 else: int(uint8(b)))
-    return aBits < bBits
+func makeMulLUT(es: int): BinaryLUT {.compileTime.} =
+    for a in 0..15:
+        for b in 0..15:
+            result[a * 16 + b] =
+                if a == 8 or b == 8: kNaR
+                else: nearest(kFloatTables[es][a] * kFloatTables[es][b], es)
 
-func `<=`*[es: static[int]](a, b: Posit4[es]): bool =
-    a < b or a == b
+func makeDivLUT(es: int): BinaryLUT {.compileTime.} =
+    for a in 0..15:
+        for b in 0..15:
+            result[a * 16 + b] =
+                if a == 8 or b == 8: kNaR
+                elif b == 0:          kNaR
+                else: nearest(kFloatTables[es][a] / kFloatTables[es][b], es)
 
-# Packing operations
-func pack*[es: static[int]](high, low: Posit4[es]): PackedPosit4[Posit4[es]] =
-    PackedPosit4[Posit4[es]]((uint8(high) shl 4) or (uint8(low) and 0x0F))
+# ─────────────────────────────────────────────────────────────────────────────
+# Baked constants — one set per es value, all computed at compile time
+# ─────────────────────────────────────────────────────────────────────────────
 
-func unpackLow*[T](packed: PackedPosit4[T]): T =
-    T(uint8(packed) and 0x0F)
+const
+    kNeg   = [makeNegLUT(0),   makeNegLUT(1),   makeNegLUT(2)]
+    kAbs   = [makeAbsLUT(0),   makeAbsLUT(1),   makeAbsLUT(2)]
+    kRecip = [makeRecipLUT(0), makeRecipLUT(1), makeRecipLUT(2)]
+    kSqrt  = [makeSqrtLUT(0),  makeSqrtLUT(1),  makeSqrtLUT(2)]
+    kAdd   = [makeAddLUT(0),   makeAddLUT(1),   makeAddLUT(2)]
+    kSub   = [makeSubLUT(0),   makeSubLUT(1),   makeSubLUT(2)]
+    kMul   = [makeMulLUT(0),   makeMulLUT(1),   makeMulLUT(2)]
+    kDiv   = [makeDivLUT(0),   makeDivLUT(1),   makeDivLUT(2)]
 
-func unpackHigh*[T](packed: PackedPosit4[T]): T =
-    T(uint8(packed) shr 4)
+# ─────────────────────────────────────────────────────────────────────────────
+# Predicates
+# ─────────────────────────────────────────────────────────────────────────────
 
-# String representation
-proc `$`*[es: static[int]](p: Posit4[es]): string =
-    let bits = uint8(p)
-    var bitStr = ""
+func isZero*[es](p: Posit4[es]): bool {.inline.} = uint8(p) == 0'u8
+func isNaR* [es](p: Posit4[es]): bool {.inline.} = uint8(p) == kNaR
+func isPositive*[es](p: Posit4[es]): bool {.inline.} =
+    let b = uint8(p); b != 0 and b != kNaR and (b shr 3) == 0
+func isNegative*[es](p: Posit4[es]): bool {.inline.} =
+    uint8(p) != kNaR and (uint8(p) shr 3) == 1
+
+# ─────────────────────────────────────────────────────────────────────────────
+# Conversion
+# ─────────────────────────────────────────────────────────────────────────────
+
+func toFloat*[es](p: Posit4[es]): float64 {.inline.} =
+    if p.isNaR: Inf else: kFloatTables[es][uint8(p)]
+
+func toFloat32*[es](p: Posit4[es]): float32 {.inline.} = float32(p.toFloat)
+
+func fromFloat*[es](_: typedesc[Posit4[es]]; v: float64): Posit4[es] {.inline.} =
+    if v != v or v >= 1e300 or v <= -1e300: return Posit4[es](kNaR)
+    if v == 0.0 or v == -0.0: return Posit4[es](0'u8)
+    var best = 0'u8
+    var bestDist = 1e300
+    for i in 0'u8 ..< 16'u8:
+        if i == kNaR: continue
+        let d = abs(kFloatTables[es][i] - v)
+        if d < bestDist:
+            bestDist = d
+            best = i
+    Posit4[es](best)
+
+func to*[esA, esB](p: Posit4[esA]; _: typedesc[Posit4[esB]]): Posit4[esB] {.inline.} =
+    Posit4[esB].fromFloat(p.toFloat)
+
+func bits*[es](p: Posit4[es]): uint8 {.inline.} = uint8(p)
+
+# ─────────────────────────────────────────────────────────────────────────────
+# Arithmetic — all O(1) table lookups
+# ─────────────────────────────────────────────────────────────────────────────
+
+func `-`*[es](p: Posit4[es]): Posit4[es] {.inline.} =
+    Posit4[es](kNeg[es][uint8(p)])
+
+func abs*[es](p: Posit4[es]): Posit4[es] {.inline.} =
+    Posit4[es](kAbs[es][uint8(p)])
+
+func recip*[es](p: Posit4[es]): Posit4[es] {.inline.} =
+    Posit4[es](kRecip[es][uint8(p)])
+
+func sqrt*[es](p: Posit4[es]): Posit4[es] {.inline.} =
+    Posit4[es](kSqrt[es][uint8(p)])
+
+func `+`*[es](a, b: Posit4[es]): Posit4[es] {.inline.} =
+    Posit4[es](kAdd[es][int(uint8(a)) * 16 + int(uint8(b))])
+
+func `-`*[es](a, b: Posit4[es]): Posit4[es] {.inline.} =
+    Posit4[es](kSub[es][int(uint8(a)) * 16 + int(uint8(b))])
+
+func `*`*[es](a, b: Posit4[es]): Posit4[es] {.inline.} =
+    Posit4[es](kMul[es][int(uint8(a)) * 16 + int(uint8(b))])
+
+func `/`*[es](a, b: Posit4[es]): Posit4[es] {.inline.} =
+    Posit4[es](kDiv[es][int(uint8(a)) * 16 + int(uint8(b))])
+
+func `+=`*[es](a: var Posit4[es]; b: Posit4[es]) {.inline.} = a = a + b
+func `-=`*[es](a: var Posit4[es]; b: Posit4[es]) {.inline.} = a = a - b
+func `*=`*[es](a: var Posit4[es]; b: Posit4[es]) {.inline.} = a = a * b
+func `/=`*[es](a: var Posit4[es]; b: Posit4[es]) {.inline.} = a = a / b
+
+# ─────────────────────────────────────────────────────────────────────────────
+# Comparison  (NaR is unordered, like IEEE NaN)
+# ─────────────────────────────────────────────────────────────────────────────
+
+func `==`*[es](a, b: Posit4[es]): bool {.inline.} =
+    not a.isNaR and not b.isNaR and uint8(a) == uint8(b)
+
+func `<`*[es](a, b: Posit4[es]): bool {.inline.} =
+    not a.isNaR and not b.isNaR and a.toFloat < b.toFloat
+
+func `<=`*[es](a, b: Posit4[es]): bool {.inline.} =
+    not a.isNaR and not b.isNaR and a.toFloat <= b.toFloat
+
+# ─────────────────────────────────────────────────────────────────────────────
+# Quire — exact float64 accumulator for fused MAC operations
+# ─────────────────────────────────────────────────────────────────────────────
+# All Posit4 products fit exactly in float64 (max |product| = 256^2 = 65536).
+
+type Quire4*[es: static int] = object
+    val*: float64
+
+func `+=`*[es](q: var Quire4[es]; args: tuple[a, b: Posit4[es]]) {.inline.} =
+    q.val += args.a.toFloat * args.b.toFloat
+
+func toPosit*[es](q: Quire4[es]): Posit4[es] {.inline.} =
+    Posit4[es].fromFloat(q.val)
+
+func clear*[es](q: var Quire4[es]) {.inline.} = q.val = 0.0
+
+# ─────────────────────────────────────────────────────────────────────────────
+# Display
+# ─────────────────────────────────────────────────────────────────────────────
+
+func `$`*[es](p: Posit4[es]): string =
+    var s = ""
+    let b = uint8(p)
     for i in countdown(3, 0):
-        bitStr &= $(int((bits shr i) and 1))
-    return "Posit4[" & $es & "](" & bitStr & " = " & $p.toFloat & ")"
-
-# Convenience constructors
-func posit4*[es: static[int]](x: float): Posit4[es] =
-    fromFloat[es](x)
-
-func posit4*[es: static[int]](bits: uint8): Posit4[es] =
-    Posit4[es](bits and 0x0F)
-
-# Export common values
-# TODO: variants for posit8, posit16, posit32
-template maxPos*[es: static[int]](): Posit4[es] = Posit4[es](7)  # 0111
-template minPos*[es: static[int]](): Posit4[es] = Posit4[es](1)  # 0001
-template negMaxPos*[es: static[int]](): Posit4[es] = Posit4[es](9)  # 1001
-template negMinPos*[es: static[int]](): Posit4[es] = Posit4[es](15) # 1111
+        s.add(if ((b shr i) and 1) == 1: '1' else: '0')
+    if p.isNaR: s & "[4," & $es & "]=NaR"
+    else:        s & "[4," & $es & "]=" & $p.toFloat
